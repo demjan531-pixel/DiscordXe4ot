@@ -70,9 +70,9 @@ def check_task_assignment(interaction, team_role, assignee):
 
 
 def assignment_label(row):
-    person = f"<@{row['assignee']}>" if row["assignee"] else ""
-    role = f"<@&{row['team_role']}>" if row["team_role"] else ""
-    return " · ".join(filter(None, (person, role))) or "без роли и ответственного"
+    person = f"Исполнитель: <@{row['assignee']}>" if row["assignee"] else ""
+    role = f"Роль: <@&{row['team_role']}>" if row["team_role"] else ""
+    return " · ".join(filter(None, (person, role))) or "без роли и исполнителя"
 
 
 def safe(value, limit=None):
@@ -100,6 +100,59 @@ def task_detail(row, today):
     if row["reason"]:
         result += f"\nПричина блокировки: {safe(row['reason'], 220)}"
     return result
+
+
+TASK_PAGE_SIZE = 5
+
+
+def task_list_page(rows, total, page, today):
+    if not total:
+        return "С такими фильтрами задач нет."
+    pages = math.ceil(total / TASK_PAGE_SIZE)
+    header = f"**Задачи · страница {page}/{pages} · всего {total}**"
+    return "\n".join([header, *(task_line(row, today) for row in rows)])[:2000]
+
+
+class TaskListView(discord.ui.View):
+    def __init__(self, store, guild, filters, page, total, today):
+        super().__init__(timeout=900)
+        self.store = store
+        self.guild = guild
+        self.filters = filters
+        self.page = page
+        self.pages = max(1, math.ceil(total / TASK_PAGE_SIZE))
+        self.today = today
+        self.owner_id = None
+        self.previous_button.disabled = page <= 1
+        self.next_button.disabled = page >= self.pages
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Листать этот список может только тот, кто его открыл.", ephemeral=True)
+            return False
+        return True
+
+    async def _show_page(self, interaction, page):
+        rows, total = self.store.board(
+            self.guild, page=page, size=TASK_PAGE_SIZE, **self.filters)
+        self.pages = max(1, math.ceil(total / TASK_PAGE_SIZE))
+        self.page = min(max(1, page), self.pages)
+        if self.page != page and total:
+            rows, total = self.store.board(
+                self.guild, page=self.page, size=TASK_PAGE_SIZE, **self.filters)
+        self.previous_button.disabled = self.page <= 1
+        self.next_button.disabled = self.page >= self.pages
+        await interaction.response.edit_message(
+            content=task_list_page(rows, total, self.page, self.today), view=self)
+
+    @discord.ui.button(label="← Назад", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction, button):
+        await self._show_page(interaction, self.page - 1)
+
+    @discord.ui.button(label="Дальше →", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction, button):
+        await self._show_page(interaction, self.page + 1)
 
 
 def summary(store, guild, today, *, area=None, team_role=None):
@@ -384,23 +437,66 @@ def build_group(bot):
 
     @group.command(name="list", description="Показать задачи, при желании с фильтром")
     @app_commands.describe(status="Фильтр по статусу", area="Фильтр по направлению",
-                           assignee="Фильтр по ответственному", page="Страница списка",
+                           assignee="Фильтр по ответственному", page="Начальная страница списка",
                            team_role="Фильтр по роли", priority="Фильтр по приоритету")
     @app_commands.choices(status=STATUS_CHOICES, area=AREA_CHOICES, priority=PRIORITY_CHOICES)
     async def list_tasks(interaction: discord.Interaction, status: str | None = None,
                          area: str | None = None, assignee: discord.Member | None = None,
                          page: app_commands.Range[int, 1, 10000] = 1,
                          team_role: discord.Role | None = None, priority: str | None = None):
-        rows, total = bot.store.board(guild, status, area, assignee.id if assignee else None, page,
-                                     team_role=team_role.id if team_role else None, priority=priority)
+        filters = {
+            "status": status,
+            "area": area,
+            "assignee": assignee.id if assignee else None,
+            "team_role": team_role.id if team_role else None,
+            "priority": priority,
+        }
+        rows, total = bot.store.board(
+            guild, page=page, size=TASK_PAGE_SIZE, **filters)
         if not total:
-            result = "С такими фильтрами задач нет."
-        elif not rows:
-            result = f"Нет страницы {page}. Всего страниц: {math.ceil(total / 5)}."
-        else:
-            header = f"**Задачи · страница {page}/{math.ceil(total / 5)} · всего {total}**"
-            result = "\n".join([header, *(task_line(row, bot.today()) for row in rows)])
-        await interaction.response.send_message(result[:2000], ephemeral=True, suppress_embeds=True)
+            await interaction.response.send_message(
+                task_list_page(rows, total, 1, bot.today()), ephemeral=True,
+                suppress_embeds=True)
+            return
+        pages = math.ceil(total / TASK_PAGE_SIZE)
+        page = min(page, pages)
+        if page != 1 and not rows:
+            rows, total = bot.store.board(
+                guild, page=page, size=TASK_PAGE_SIZE, **filters)
+        result = task_list_page(rows, total, page, bot.today())
+        view = TaskListView(bot.store, guild, filters, page, total, bot.today())
+        view.owner_id = interaction.user.id
+        await interaction.response.send_message(
+            result, ephemeral=True, suppress_embeds=True, view=view)
+
+    @group.command(name="mine", description="Показать задачи, которые ты взял или выполняешь")
+    @app_commands.describe(page="Начальная страница списка")
+    async def my_tasks(interaction: discord.Interaction,
+                       page: app_commands.Range[int, 1, 10000] = 1):
+        filters = {
+            "status": None,
+            "area": None,
+            "assignee": interaction.user.id,
+            "team_role": None,
+            "priority": None,
+        }
+        rows, total = bot.store.board(
+            guild, page=page, size=TASK_PAGE_SIZE, **filters)
+        if not total:
+            await interaction.response.send_message(
+                "У тебя пока нет взятых задач.", ephemeral=True,
+                suppress_embeds=True)
+            return
+        pages = math.ceil(total / TASK_PAGE_SIZE)
+        page = min(page, pages)
+        if not rows:
+            rows, total = bot.store.board(
+                guild, page=page, size=TASK_PAGE_SIZE, **filters)
+        view = TaskListView(bot.store, guild, filters, page, total, bot.today())
+        view.owner_id = interaction.user.id
+        await interaction.response.send_message(
+            task_list_page(rows, total, page, bot.today()), ephemeral=True,
+            suppress_embeds=True, view=view)
 
     @group.command(name="show", description="Открыть карточку задачи")
     @app_commands.describe(task_id="Номер задачи, без символа #")

@@ -236,7 +236,7 @@ class DiscordTests(TestCase):
         self.assertEqual({command.name for command in commands}, {"task", "progress", "role"})
         group = self.bot.tree.get_command("task", guild=self.bot.guild)
         self.assertEqual({cmd.name for cmd in group.commands},
-                         {"create", "list", "show", "status", "edit", "claim", "history"})
+                         {"create", "list", "mine", "show", "status", "edit", "claim", "history"})
         role_group = self.bot.tree.get_command("role", guild=self.bot.guild)
         self.assertEqual({cmd.name for cmd in role_group.commands}, {"grant", "remove", "list"})
         create = group.get_command("create")
