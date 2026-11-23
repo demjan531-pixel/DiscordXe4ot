@@ -134,6 +134,7 @@ class TaskListView(discord.ui.View):
         return True
 
     async def _show_page(self, interaction, page):
+        await interaction.response.defer()
         rows, total = self.store.board(
             self.guild, page=page, size=TASK_PAGE_SIZE, **self.filters)
         self.pages = max(1, math.ceil(total / TASK_PAGE_SIZE))
@@ -143,7 +144,7 @@ class TaskListView(discord.ui.View):
                 self.guild, page=self.page, size=TASK_PAGE_SIZE, **self.filters)
         self.previous_button.disabled = self.page <= 1
         self.next_button.disabled = self.page >= self.pages
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=task_list_page(rows, total, self.page, self.today), view=self)
 
     @discord.ui.button(label="← Назад", style=discord.ButtonStyle.secondary)
@@ -346,10 +347,13 @@ class TrackerTree(app_commands.CommandTree):
         else:
             LOG.error("Сбой команды", exc_info=(type(source), source, source.__traceback__))
             message = "Команду не удалось выполнить. Попробуй ещё раз или сообщи владельцу бота."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.HTTPException as reply_error:
+            LOG.warning("Не удалось отправить ответ об ошибке: %s", reply_error)
 
 
 STATUS_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in STATUSES.items()]
@@ -444,6 +448,7 @@ def build_group(bot):
                          area: str | None = None, assignee: discord.Member | None = None,
                          page: app_commands.Range[int, 1, 10000] = 1,
                          team_role: discord.Role | None = None, priority: str | None = None):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         filters = {
             "status": status,
             "area": area,
@@ -454,9 +459,8 @@ def build_group(bot):
         rows, total = bot.store.board(
             guild, page=page, size=TASK_PAGE_SIZE, **filters)
         if not total:
-            await interaction.response.send_message(
-                task_list_page(rows, total, 1, bot.today()), ephemeral=True,
-                suppress_embeds=True)
+            await interaction.edit_original_response(
+                content=task_list_page(rows, total, 1, bot.today()))
             return
         pages = math.ceil(total / TASK_PAGE_SIZE)
         page = min(page, pages)
@@ -466,13 +470,13 @@ def build_group(bot):
         result = task_list_page(rows, total, page, bot.today())
         view = TaskListView(bot.store, guild, filters, page, total, bot.today())
         view.owner_id = interaction.user.id
-        await interaction.response.send_message(
-            result, ephemeral=True, suppress_embeds=True, view=view)
+        await interaction.edit_original_response(content=result, view=view)
 
     @group.command(name="mine", description="Показать задачи, которые ты взял или выполняешь")
     @app_commands.describe(page="Начальная страница списка")
     async def my_tasks(interaction: discord.Interaction,
                        page: app_commands.Range[int, 1, 10000] = 1):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         filters = {
             "status": None,
             "area": None,
@@ -483,9 +487,8 @@ def build_group(bot):
         rows, total = bot.store.board(
             guild, page=page, size=TASK_PAGE_SIZE, **filters)
         if not total:
-            await interaction.response.send_message(
-                "У тебя пока нет взятых задач.", ephemeral=True,
-                suppress_embeds=True)
+            await interaction.edit_original_response(
+                content="У тебя пока нет взятых задач.")
             return
         pages = math.ceil(total / TASK_PAGE_SIZE)
         page = min(page, pages)
@@ -494,9 +497,8 @@ def build_group(bot):
                 guild, page=page, size=TASK_PAGE_SIZE, **filters)
         view = TaskListView(bot.store, guild, filters, page, total, bot.today())
         view.owner_id = interaction.user.id
-        await interaction.response.send_message(
-            task_list_page(rows, total, page, bot.today()), ephemeral=True,
-            suppress_embeds=True, view=view)
+        await interaction.edit_original_response(
+            content=task_list_page(rows, total, page, bot.today()), view=view)
 
     @group.command(name="show", description="Открыть карточку задачи")
     @app_commands.describe(task_id="Номер задачи, без символа #")
